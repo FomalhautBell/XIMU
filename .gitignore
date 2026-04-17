@@ -1,0 +1,30 @@
+codex.md
+.codex
+*.faa
+
+# Local protein/database inputs and generated search indexes.
+databases/
+Databases/
+Pep_Databases/
+ximu_db/
+*.faiss
+*.parquet
+*.db
+*.npy
+progress.txt
+
+# Python artifacts.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Local environments and editor state.
+.venv/
+venv/
+.env
+.DS_Store
