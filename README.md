@@ -147,6 +147,17 @@ This PDF shows raw window counts by species and cosine-distance bin for the repo
 
 ## Database
 
+The released XIMU database is available from Zenodo:
+
+- DOI: `10.5281/zenodo.19642075`
+- Zenodo record: `doi.org/10.5281/zenodo.19642075`
+
+Download the following three files into one database directory and pass that directory to `--db`:
+
+- `ximu.faiss`
+- `ximu_windows.parquet`
+- `ximu_meta.db`
+
 The full database built on 2026-04-18 contains the following indexed species.
 
 | Species | Genome label | Proteins |
@@ -200,3 +211,5 @@ If you use XIMU, please also cite the following LCR benchmarking work:
 "A Benchmarking Framework for Comparative Evaluation of Low-Complexity Region Detection Tools in the Human Proteome." bioRxiv (2026). DOI: 10.64898/2026.01.24.701293v1
 
 This work provides a systematic benchmarking framework for LCR detection methods. XIMU's low-complexity space coordinates, mutation percentage and dominant residue fraction, follow its theoretical framework.
+
+If you use the released XIMU database, please cite the Zenodo record: DOI `10.5281/zenodo.19642075`. The record contains `ximu.faiss`, `ximu_windows.parquet`, and `ximu_meta.db`.
