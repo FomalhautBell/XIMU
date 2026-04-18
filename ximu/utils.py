@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import gzip
 from pathlib import Path
+import re
 from typing import Iterator, TextIO
 
 from .features import STANDARD_AA
@@ -76,3 +77,45 @@ def iter_windows(sequence: str, window_size: int = 48, stride: int = 24) -> Iter
     for start in range(0, seq_len - window_size + 1, stride):
         end = start + window_size
         yield start, end, sequence[start:end]
+
+
+def clean_genome_name(genome: str) -> str:
+    """Return a compact display name inferred from a stored genome label."""
+
+    skip_words = {
+        "pep",
+        "all",
+        "filter",
+        "longest",
+        "proteins",
+        "protein",
+        "genecatalog",
+        "assembly",
+        "pseudomolecules",
+        "genome",
+        "with",
+        "organelles",
+        "models",
+        "aa",
+        "gca",
+        "reference",
+        "nam",
+        "cds",
+    }
+    words: list[str] = []
+    for part in re.split(r"[_\W]+", genome):
+        if not part:
+            continue
+        lowered = part.lower()
+        if lowered in skip_words or lowered.isdigit():
+            continue
+        if (lowered.startswith("v") or lowered.startswith("r")) and lowered[1:].isdigit():
+            continue
+        if re.fullmatch(r"[A-Z]*\d+[A-Z0-9]*", part):
+            continue
+        words.append(part)
+        if len(words) == 2:
+            break
+    if len(words) >= 2:
+        return f"{words[0]} {words[1]}"
+    return genome.replace("_", " ")

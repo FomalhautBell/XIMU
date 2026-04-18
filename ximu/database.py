@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 import sqlite3
+from typing import Iterable, Iterator
 
 import numpy as np
 
 from .features import compute_features, compute_max_consecutive_Q
-from .utils import is_standard_sequence, iter_windows, parse_fasta
+from .utils import FastaRecord, is_standard_sequence, iter_windows, parse_fasta
 
 WINDOW_SIZE = 48
 STRIDE = 24
 MIN_PROT_LEN = 48
 VECTOR_DIM = 26
+DEFAULT_CHUNK_SIZE = 500
 
 
 def _require_database_dependencies() -> tuple[object, object, object]:
@@ -77,13 +80,7 @@ def _initial_state(db_dir: Path, append: bool):
         next_window_id = 0 if old_rows is None else len(old_rows)
         return old_rows, old_vectors, next_window_id
 
-    existing_outputs = [
-        db_dir / "ximu.faiss",
-        parquet_path,
-        db_dir / "ximu_meta.db",
-        db_dir / "ximu_q5_index.npy",
-        vectors_path,
-    ]
+    existing_outputs = [db_dir / "ximu.faiss", parquet_path, db_dir / "ximu_meta.db", vectors_path]
     present = [path.name for path in existing_outputs if path.exists()]
     if present:
         names = ", ".join(present)
@@ -121,13 +118,73 @@ def _write_sqlite(db_path: Path, proteins: list[dict], append: bool) -> None:
         connection.close()
 
 
-def build_q5_index(parquet_path: str | Path, output_path: str | Path) -> None:
-    """Save window IDs with max_consec_q >= 5 as a NumPy int64 array."""
+def _batched(records: Iterable[FastaRecord], chunk_size: int) -> Iterator[list[FastaRecord]]:
+    batch: list[FastaRecord] = []
+    for record in records:
+        batch.append(record)
+        if len(batch) >= chunk_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
 
-    _, pd, _ = _require_database_dependencies()
-    windows = pd.read_parquet(parquet_path, columns=["window_id", "max_consec_q"])
-    q5_window_ids = windows.loc[windows["max_consec_q"] >= 5, "window_id"].to_numpy(dtype=np.int64)
-    np.save(output_path, q5_window_ids)
+
+def _process_record(record: FastaRecord, genome_name: str) -> dict:
+    seq = record.sequence
+    if len(seq) < MIN_PROT_LEN:
+        return {"status": "short", "protein_id": record.protein_id}
+    if not is_standard_sequence(seq):
+        return {"status": "nonstandard", "protein_id": record.protein_id}
+
+    windows = []
+    vectors = []
+    for start, end, window_seq in iter_windows(seq, WINDOW_SIZE, STRIDE):
+        features = compute_features(window_seq, window_start=start, protein_length=len(seq))
+        windows.append(
+            {
+                "protein_id": record.protein_id,
+                "start": start,
+                "end": end,
+                "prot_len": len(seq),
+                "max_consec_q": compute_max_consecutive_Q(window_seq),
+            }
+        )
+        vectors.append(features)
+
+    return {
+        "status": "ok",
+        "protein_id": record.protein_id,
+        "protein": {
+            "protein_id": record.protein_id,
+            "description": record.description,
+            "prot_len": len(seq),
+            "genome": genome_name,
+            "sequence": seq,
+        },
+        "windows": windows,
+        "vectors": vectors,
+    }
+
+
+def _process_chunk(args: tuple[list[FastaRecord], str]) -> list[dict]:
+    records, genome_name = args
+    return [_process_record(record, genome_name) for record in records]
+
+
+def _iter_processed_chunks(
+    records: Iterable[FastaRecord],
+    genome_name: str,
+    jobs: int,
+    chunk_size: int,
+) -> Iterator[list[dict]]:
+    chunks = ((chunk, genome_name) for chunk in _batched(records, chunk_size))
+    if jobs <= 1:
+        for chunk in chunks:
+            yield _process_chunk(chunk)
+        return
+
+    with ProcessPoolExecutor(max_workers=jobs) as executor:
+        yield from executor.map(_process_chunk, chunks)
 
 
 def build_database(
@@ -135,10 +192,17 @@ def build_database(
     db_dir: str,
     genome_name: str,
     append: bool = False,
-) -> None:
+    jobs: int = 1,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+) -> dict:
     """Build or append a XIMU vector database from a protein FASTA file."""
 
     faiss, pd, _ = _require_database_dependencies()
+    if jobs < 1:
+        raise ValueError("jobs must be >= 1")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be >= 1")
+
     output_dir = Path(db_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     old_rows, old_vectors, next_window_id = _initial_state(output_dir, append)
@@ -150,48 +214,42 @@ def build_database(
     proteins: list[dict] = []
     skipped_short = 0
     skipped_nonstandard = 0
+    processed_count = 0
 
     with progress_path.open("a", encoding="utf-8") as progress:
-        for record in parse_fasta(fasta_file):
-            if record.protein_id in processed:
-                continue
-            seq = record.sequence
-            if len(seq) < MIN_PROT_LEN:
-                skipped_short += 1
-                progress.write(record.protein_id + "\n")
-                continue
-            if not is_standard_sequence(seq):
-                skipped_nonstandard += 1
-                progress.write(record.protein_id + "\n")
-                continue
+        record_iter = (record for record in parse_fasta(fasta_file) if record.protein_id not in processed)
+        for results in _iter_processed_chunks(record_iter, genome_name, jobs, chunk_size):
+            for result in results:
+                processed_count += 1
+                protein_id = result["protein_id"]
+                status = result["status"]
+                if status == "short":
+                    skipped_short += 1
+                    progress.write(protein_id + "\n")
+                    continue
+                if status == "nonstandard":
+                    skipped_nonstandard += 1
+                    progress.write(protein_id + "\n")
+                    continue
 
-            proteins.append(
-                {
-                    "protein_id": record.protein_id,
-                    "description": record.description,
-                    "prot_len": len(seq),
-                    "genome": genome_name,
-                    "sequence": seq,
-                }
-            )
-            for start, end, window_seq in iter_windows(seq, WINDOW_SIZE, STRIDE):
-                features = compute_features(window_seq, window_start=start, protein_length=len(seq))
-                row = {
-                    "window_id": next_window_id,
-                    "protein_id": record.protein_id,
-                    "start": start,
-                    "end": end,
-                    "prot_len": len(seq),
-                    "max_consec_q": compute_max_consecutive_Q(window_seq),
-                }
-                for idx, value in enumerate(features):
-                    row[f"feat_{idx:02d}"] = np.float16(value)
-                new_rows.append(row)
-                new_vectors.append(features)
-                next_window_id += 1
+                proteins.append(result["protein"])
+                for window, features in zip(result["windows"], result["vectors"]):
+                    row = {
+                        "window_id": next_window_id,
+                        "protein_id": window["protein_id"],
+                        "start": window["start"],
+                        "end": window["end"],
+                        "prot_len": window["prot_len"],
+                        "max_consec_q": window["max_consec_q"],
+                    }
+                    for idx, value in enumerate(features):
+                        row[f"feat_{idx:02d}"] = np.float16(value)
+                    new_rows.append(row)
+                    new_vectors.append(features)
+                    next_window_id += 1
 
-            processed.add(record.protein_id)
-            progress.write(record.protein_id + "\n")
+                processed.add(protein_id)
+                progress.write(protein_id + "\n")
             progress.flush()
 
     if not new_rows and old_rows is None:
@@ -214,7 +272,16 @@ def build_database(
     windows.to_parquet(parquet_path, index=False)
     np.save(output_dir / "ximu_vectors.npy", vectors)
     _write_sqlite(output_dir / "ximu_meta.db", proteins, append=append)
-    build_q5_index(parquet_path, output_dir / "ximu_q5_index.npy")
 
     index = build_faiss_index(vectors)
     faiss.write_index(index, str(output_dir / "ximu.faiss"))
+    return {
+        "processed": processed_count,
+        "proteins": len(proteins),
+        "windows": len(new_rows),
+        "skipped_short": skipped_short,
+        "skipped_nonstandard": skipped_nonstandard,
+        "total_windows": len(windows),
+        "jobs": jobs,
+        "chunk_size": chunk_size,
+    }

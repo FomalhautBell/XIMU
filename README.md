@@ -2,110 +2,201 @@
 
 eXpressive Inference-based Motif Utilities
 
-XIMU 是一个面向低复杂度区域（LCR）蛋白片段的向量检索工具。它把蛋白窗口编码为 26 维特征，使用 Faiss 做近邻召回，再按整蛋白窗口相似度重排。
+XIMU is a vector-search utility for protein low-complexity regions (LCRs). It encodes fixed protein windows as 26-dimensional composition and physicochemical feature vectors, retrieves similar local windows with Faiss, and re-ranks candidate proteins with full-protein window rescoring.
 
-## 环境
+## Installation
 
-当前项目按 Python 3.12 编写，建议在你的 `XIMUENV` conda 环境中安装依赖：
+XIMU is developed and tested with Python 3.12.
 
 ```bash
+conda create -n XIMUENV python=3.12
 conda activate XIMUENV
 python -m pip install -r requirements.txt
 ```
 
-依赖包括：
+Core dependencies:
 
-- `numpy`：26 维特征计算与向量操作
-- `faiss-cpu`：向量索引与检索
-- `pandas` / `pyarrow`：窗口表 Parquet 读写
-- `biopython`：兼容后续 FASTA 生态，当前代码内置了轻量 FASTA 解析器
-- `tqdm`：后续长任务进度显示预留
-- `pytest`：测试
+- `numpy` for feature vectors and numerical operations
+- `faiss-cpu` for vector indexing and nearest-neighbor search
+- `pandas` and `pyarrow` for Parquet window tables
+- `biopython` for compatibility with common FASTA workflows
+- `matplotlib` for optional analysis plots
+- `pytest` for tests
 
-本轮 smoke test 使用的 `XIMUENV` 实际安装版本：
-
-```text
-biopython==1.87
-faiss-cpu==1.13.2
-numpy==2.4.4
-pandas==3.0.2
-pyarrow==23.0.1
-pytest==9.0.3
-tqdm==4.67.3
-```
-
-## 代码结构
+## Package Layout
 
 ```text
 ximu/
-  features.py      # 26维特征、polyQ长度、序列校验
-  utils.py         # FASTA读取、滑窗
-  database.py      # 建库、Faiss索引、Parquet/SQLite/Q5索引输出
-  search.py        # Faiss召回与蛋白元数据合并
-  scoring.py       # 整蛋白重排与polyQ模式打分
+  features.py      # 26-dimensional feature extraction
+  utils.py         # FASTA parsing and sliding windows
+  database.py      # database construction, Parquet, SQLite, and Faiss index writing
+  search.py        # Faiss retrieval and metadata joins
+  scoring.py       # full-protein candidate rescoring
 scripts/
-  build_db.py      # 建库入口
-  query.py         # 查询入口
+  build_db.py      # database builder CLI
+  query.py         # query CLI
 tests/
-  test_features.py # 特征计算 smoke/unit tests
+  test_features.py
+  test_database.py
 ```
 
-## 建库
+## Build a Database
 
-数据库输入是蛋白 FASTA 文件。建库会跳过短于 48 aa 或含非标准氨基酸的蛋白。
+Input files are protein FASTA files. Proteins shorter than 48 amino acids or containing non-standard amino acids are skipped.
 
 ```bash
 python scripts/build_db.py \
-  --fasta Pep_Databases/Chlamydomonas_reinhardtii.Chlamydomonas_reinhardtii_v5.5.pep.all.filter.fa \
-  --db ximu_db/chlamy \
-  --genome Chlamydomonas_reinhardtii_v5.5
+  --fasta proteins.fa \
+  --db ximu_db/example \
+  --genome example_genome \
+  --jobs 15
 ```
 
-追加新物种：
+Append another FASTA file to the same database:
 
 ```bash
 python scripts/build_db.py \
-  --fasta Pep_Databases/Homo_sapiens.GRCh38.pep.all.filter.fa \
-  --db ximu_db/all \
-  --genome Homo_sapiens_GRCh38 \
-  --append
+  --fasta another_species.fa \
+  --db ximu_db/example \
+  --genome another_species \
+  --append \
+  --jobs 15
 ```
 
-输出目录中会生成：
+`--jobs 1` uses the serial path. On multi-core servers, increase `--jobs` near the available CPU count. `--chunk-size` controls how many protein records are sent to each worker task; the default is `500`.
 
-- `ximu.faiss`
-- `ximu_windows.parquet`
-- `ximu_meta.db`
-- `ximu_q5_index.npy`
-- `ximu_vectors.npy`：额外保存的原始 float32 向量，用于追加建库时重建 Faiss 索引
-- `progress.txt`
+Database outputs:
 
-## 查询
+- `ximu.faiss`: Faiss vector index
+- `ximu_windows.parquet`: indexed window metadata and feature table
+- `ximu_meta.db`: protein metadata and full protein sequences
+- `ximu_vectors.npy`: float32 feature matrix used to support later append operations
+- `progress.txt`: resumable build progress log
 
-实验输入蛋白序列可以直接使用仓库里的 `.faa` 文件：
+For public database distribution, only `ximu.faiss`, `ximu_windows.parquet`, and `ximu_meta.db` are required for querying.
+
+## Query
+
+Query from a FASTA file:
 
 ```bash
-python scripts/query.py --fasta CHLRE_15g640203v5.faa --db ximu_db/chlamy --top 50
+python scripts/query.py --fasta query.faa --db ximu_db/example --top 50
 ```
 
-polyQ 专用模式：
+Query from a sequence string:
 
 ```bash
-python scripts/query.py --fasta CHLRE_15g640203v5.faa --db ximu_db/chlamy --mode polyq --top 50
+python scripts/query.py --seq "MSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS" --db ximu_db/example --top 20
 ```
 
-## 测试
+The CLI returns candidate proteins sorted by full-protein rescoring. The initial Faiss retrieval uses `top_k=100` windows by default.
+
+## Motif Scan Mode
+
+XIMU can also scan the full indexed database for windows containing a user-specified short amino-acid motif, compare those windows to the query protein in feature space, and generate a species-level heatmap of cosine-distance counts.
+
+Motif constraints:
+
+- Motif length must be from 1 to 24 amino acids.
+- Motifs must use the standard 20 amino-acid alphabet.
+- `--mismatch` allows approximate matching; values from 0 to 3 are recommended.
+
+Example with an exact serine-rich motif:
+
+```bash
+python scripts/query.py \
+  --fasta query.faa \
+  --db ximu_db/example \
+  --mode motif \
+  --motif SSSSSS \
+  --heatmap-out motif_heatmap.pdf
+```
+
+Example allowing one mismatch:
+
+```bash
+python scripts/query.py \
+  --seq "MSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS" \
+  --db ximu_db/example \
+  --mode motif \
+  --motif RGRGRG \
+  --mismatch 1 \
+  --heatmap-out motif_scan.pdf
+```
+
+Disable heatmap output:
+
+```bash
+python scripts/query.py \
+  --fasta query.faa \
+  --db ximu_db/example \
+  --mode motif \
+  --motif SSSSSS \
+  --no-heatmap
+```
+
+Motif heatmaps use raw motif-window counts per species and cosine-distance bin. The x-axis is ordered from larger to smaller cosine distance, so the right side contains windows closest to the query. Cell colors use a log-scaled `OrRd` count scale, and each cell is labeled with the raw window count.
+
+## Analysis Output
+
+The repository includes a generated example heatmap from the full database:
+
+- [Motif cosine-distance heatmap](motif_cosine_dist_heatmap.pdf)
+
+This PDF shows raw window counts by species and cosine-distance bin for the repository's reference query sequence. The x-axis is ordered from larger to smaller cosine distance, so the right side contains windows closest to the query.
+
+## Database
+
+The full database built on 2026-04-18 contains the following indexed species.
+
+| Species | Genome label | Proteins |
+|---|---|---:|
+| Triticum timopheevii | `Triticum_timopheevii_WRC_timopheevii_genome_with_organelles_pep_all` | 215,467 |
+| Triticum aestivum | `Triticum_aestivum_IWGSC_pep_all` | 106,402 |
+| Brassica napus | `Brassica_napus_AST_PRJEB5043_v1_pep_all` | 97,939 |
+| Oryza sativa | `Oryza_sativa_all_models_pep_longest` | 55,745 |
+| Zea mays | `Zea_mays_Zm_B73_REFERENCE_NAM_5_0_pep_all` | 39,756 |
+| Gossypium raimondii | `Gossypium_raimondii_Graimondii2_0_v6_pep_all` | 37,852 |
+| Hordeum vulgare | `Hordeum_vulgare_MorexV3_pseudomolecules_assembly_pep_all` | 35,825 |
+| Solanum lycopersicum | `Solanum_lycopersicum_SL3_0_pep_all` | 33,810 |
+| Physcomitrium patens | `Physcomitrium_patens_Phypa_V3_pep_all` | 31,172 |
+| Danio rerio | `Danio_rerio_GRCz11_pep_all` | 28,893 |
+| Amborella trichopoda | `Amborella_trichopoda_AMTR1_0_pep_all` | 27,302 |
+| Homo sapiens | `Homo_sapiens_GRCh38_pep_all` | 22,868 |
+| Xenopus tropicalis | `Xenopus_tropicalis_UCB_Xtro_10_0_pep_all` | 22,078 |
+| Mus musculus | `Mus_musculus_GRCm39_pep_all` | 21,980 |
+| Chlamydomonas reinhardtii | `Chlamydomonas_reinhardtii_Chlamydomonas_reinhardtii_v5_5_pep_all` | 17,731 |
+| Drosophila melanogaster | `Drosophila_melanogaster_BDGP6_32_pep_all` | 13,506 |
+| Bradyrhizobium japonicum | `Bradyrhizobium_japonicum_gca_000773865_ASM77386v1_pep_all_longest` | 9,121 |
+| Saccharomyces cerevisiae | `Saccharomyces_cerevisiae_R64_1_1_pep_all` | 6,485 |
+| Escherichia coli | `Escherichia_coli_110957_gca_000485615_ASM48561v1_pep_all` | 5,300 |
+| Schizosaccharomyces pombe | `Schizosaccharomyces_pombe_ASM294v2_pep_longsest` | 5,128 |
+| Synechocystis sp | `Synechocystis_sp_pcc_6803_gca_000009725_ASM972v1_longest_pep` | 3,543 |
+| Cyccr1 GeneCatalog proteins 20200805 aa | `Cyccr1_GeneCatalog_proteins_20200805_aa` | 2,629 |
+| Nanoce1779 2 GeneCatalog proteins 20180119 aa | `Nanoce1779_2_GeneCatalog_proteins_20180119_aa` | 397 |
+| Chabra1 GeneCatalog proteins 20200807 aa | `Chabra1_GeneCatalog_proteins_20200807_aa` | 363 |
+| Cyapar1 GeneCatalog proteins 20200807 aa | `Cyapar1_GeneCatalog_proteins_20200807_aa` | 202 |
+| ChloA99 1 GeneCatalog proteins 20200807 aa | `ChloA99_1_GeneCatalog_proteins_20200807_aa` | 30 |
+
+Summary:
+
+- Total source species processed: 27
+- Indexed species: 26
+- Source species with no standard matching proteins: `Cyamer1_GeneCatalog_proteins_20180616_aa`
+- Total indexed proteins: 841,524
+- Total indexed windows: 13,287,321
+- Build date: 2026-04-18
+
+## Tests
 
 ```bash
 python -m pytest tests
 ```
 
-## Git 注意
+## Please Cite
 
-本地需求文档和数据库输入/产物不会进入 git：
+If you use XIMU, please also cite the following LCR benchmarking work:
 
-- `codex.md`
-- `databases/`
-- `Pep_Databases/`
-- `ximu_db/`
-- Faiss、Parquet、SQLite、NumPy 索引产物
+"A Benchmarking Framework for Comparative Evaluation of Low-Complexity Region Detection Tools in the Human Proteome." bioRxiv (2026). DOI: 10.64898/2026.01.24.701293v1
+
+This work provides a systematic benchmarking framework for LCR detection methods. XIMU's low-complexity space coordinates, mutation percentage and dominant residue fraction, follow its theoretical framework.
