@@ -45,7 +45,7 @@ def _load_protein_meta(db_path: Path, protein_ids: list[str]) -> dict[str, dict]
 def search(
     query_sequence: str,
     db_dir: str,
-    top_k: int = 200,
+    top_k: int = 100,
     top_n: int = 50,
 ) -> list[dict]:
     """Return candidate proteins ranked by nearest indexed window distance."""

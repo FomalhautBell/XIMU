@@ -1,12 +1,21 @@
 codex.md
+task.md
+newfeatures.md
 .codex
 *.faa
+q5_cosine_dist_*.png
+q5_cosine_dist_*.pdf
+q5_cosine_dist_*.csv
+ximu_motif_heatmap.*
+*.raw_counts.csv
 
 # Local protein/database inputs and generated search indexes.
 databases/
 Databases/
 Pep_Databases/
 ximu_db/
+ximu_vectors.npy
+ximu_q5_index.npy
 *.faiss
 *.parquet
 *.db

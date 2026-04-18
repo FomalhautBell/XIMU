@@ -5,8 +5,8 @@ import numpy as np
 from ximu.features import compute_features, compute_max_consecutive_Q
 
 
-def test_pure_polyq():
-    seq = "Q" * 48
+def test_pure_low_complexity_serine():
+    seq = "S" * 48
     feat = compute_features(seq)
     assert feat.shape == (26,)
     assert feat.dtype == np.float32
@@ -20,12 +20,12 @@ def test_high_complexity():
     assert feat[14] < 0.2
 
 
-def test_score_order_polyq_proxy():
-    short_pure_q = "Q" * 30
-    long_impure_q = "Q" * 80 + "SS" + "Q" * 80
-    compute_features(short_pure_q)
-    compute_features(long_impure_q)
-    assert compute_max_consecutive_Q(long_impure_q) > compute_max_consecutive_Q(short_pure_q)
+def test_residue_run_counter():
+    short_run = "A" * 30
+    long_interrupted_run = "Q" * 80 + "SS" + "Q" * 80
+    compute_features(short_run)
+    compute_features(long_interrupted_run)
+    assert compute_max_consecutive_Q(long_interrupted_run) > compute_max_consecutive_Q(short_run)
 
 
 def test_feature_range():
